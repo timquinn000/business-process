@@ -1,0 +1,146 @@
+---
+title: "Business process analysis for the MEDC database"
+authors: "Tim Quinn, Greg Hood"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output: bookdown::html_document2
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE, fig.align = 'center', root.dir = 'out')
+
+source('bpm_medc_process.r')
+
+# Utility to format a table with flextable (good in Word) and add a caption
+captioned_table <- function(x, caption=''){
+  flextable(x) %>% 
+    set_caption(caption) %>% 
+    autofit()
+}
+
+# Create a process map and load the image into the knitr document
+export.pm <- function(filename, layout=layout_pm(edge_weight = TRUE, edge_cutoff = 20), ev_log=event_log, ...) {
+  dg <- ev_log %>% 
+    process_map(layout=layout, render=FALSE, ...)
+  if (file.exists(filename)) file.remove(filename)
+  export_graph(dg, filename, file_type = "png", width = 986*2)   
+  knitr::include_graphics(filename)
+}
+
+# Create a Power BI datamodel in CSV as a useful artifact
+dm <- pbi.datamodel(event_log)
+
+dm$cases <- event_log %>% 
+  tibble() %>% 
+  select(stec_id, destination) %>% 
+  unique() %>% 
+  left_join(dm$cases, by='stec_id')
+
+csvs <- lapply(1:length(dm), function(x) write.csv(
+  dm[[x]] %>% rename_with(toproper), 
+  file = paste0('csv/bpm_medc_', names(dm)[x], '.csv'),
+  row.names = FALSE))
+
+write.csv(events %>% rename_with(toproper), 'csv/medc_events.csv', row.names = FALSE)
+
+```
+# Overview {-}
+
+Business process analysis (BPA) or [process mining](https://en.wikipedia.org/wiki/Process_mining) is a technique that can be used to understand what people, computer systems and organisations are doing. In most organisations, people usually start to analyse business processes by constructing models or flow diagrams to depict the key events and how one flows into another. Diagrams depicting such models are commonly constructed manually using a word processor or diagramming tool after discussions with subject matter experts (SMEs). When done well, construction and discussion of these models can promote a common understanding of a business process and lead to well-understood and measurable performance criteria.
+
+Manual processes, however, have some limitations: 
+
+* they depend on an accurate understanding of the process by SMEs
+* often ignore uncommon or exceptional processes
+* do not provide a quantitative view of the process
+* can be relatively slow because of the requirement to transfer knowledge from SMEs to the analyst.
+
+BPA as defined here, however, is an automated method for analysis of a business processes. It starts from event data recorded in a database -- in the form of time or date stamps -- which is massaged into a formal structure called an 'event log'. If appropriate data is available, this automated method can avoid the problems listed above and provide regular and, sometimes, real-time analysis of a business process.
+
+This document is a preliminary exploration of the potential of the department's MEDC database to support BPA and provide regular analyses of the meat hygiene testing system. 
+
+
+# Data source {-}
+
+To get the process started, we developed an SQL query that interrogates the T2_EXPORTS database created by the Analytics Centre from the MEDC database. The advantage of doing so is that T2_EXPORTS provides a clear, business-oriented view of key events. (The raw MEDC database, like most transactional systems, is in what is called a highly normalised form that is best suited for interrogation by database experts rather than analysts.)
+
+The SQL query generates a dataset from the 'CartonMeatStec' table, which, for each STEC test, includes the date of the production run and the date of the test. For some records it also includes the date of confirmation.
+
+
+``` {r events, echo=FALSE }
+  
+confirmed_ids <- events %>% 
+  filter(activity=='Confirmed') %>% 
+  pull(stec_id)
+
+events %>% 
+  filter(stec_id %in% confirmed_ids,
+         destination=='USA') %>% #Otherwise we get 'Other' in this demo, which is less informative
+  arrange(stec_id) %>%           #so that each process for each STEC sample is contiguous
+  head(9) %>% 
+  rename_with(toproper) %>% 
+  captioned_table('Example of events extracted from STEC tests in MEDC 
+                  (in the bupaR format -- see https://www.bupar.net/creating_eventlogs.html).')
+
+```
+
+After some processing using the [bupaR library](https://www.bupar.net) an event log can be obtained. This shows that, for the majority of cases, a test occurs after or on the same day as the production run and there is no confirmation. A confirmation is recorded for only 1.4% (102/6953) of the cases. However, the process map for the full data set is a little confusing because there are 52 cases in which the test date precedes the date of the production run, and 5 cases in which the confirmation precedes the test. Removing these cases yields a simple map showing the frequency of each process:
+
+
+```{r awkwardevents, echo=FALSE, message=FALSE, warning=FALSE}
+
+test_b4_prod <- events %>% 
+  filter(activity != 'Confirmed') %>% 
+  pivot_wider(id_cols = stec_id, names_from = 'activity', values_from = 'start_datetime') %>% 
+  filter(Test < Production) %>% 
+  pull(stec_id)
+
+confirm_b4_test <- events %>% 
+  filter(stec_id %in% confirmed_ids) %>% 
+  pivot_wider(id_cols = stec_id, names_from = 'activity', values_from = 'start_datetime') %>% 
+  filter(Confirmed < Test) %>% 
+  pull(stec_id)
+
+not_b4 <- event_log %>% 
+  filter(!(stec_id %in% test_b4_prod),
+         !(stec_id %in% confirm_b4_test))
+
+export.pm('out/pv_not_b4.png', ev_log = not_b4 )
+
+
+```
+
+And a map of event durations shows the intervals between a production run and a test and between a test and confirmation. 
+
+```{r eventcounts, echo=FALSE, message=FALSE, warning=FALSE}
+
+
+export.pm('out/process_performance_mean.png', 
+          ev_log = not_b4,
+          type=performance(mean, units='days'), 
+          fixed_edge_width=FALSE)
+
+
+```
+
+
+```{r animation, echo=FALSE, fig.height=2, fig.width=7, message=FALSE, warning=FALSE}
+
+dest_animation <- animate_process(event_log,
+                                   legend = "color", 
+                                   mode = "absolute",
+                                   jitter=10,
+                                   repeat_count=10,
+                                   repeat_delay=5,
+                                   layout=layout_pm(edge_weight=TRUE, edge_cutoff=2),
+                                   mapping = token_aes(color = token_scale("destination", 
+                                                                           scale = "ordinal",
+                                                                           range = RColorBrewer::brewer.pal(8, "Paired"))))
+
+save.widget(dest_animation, dir='out')
+
+```
+
+# Further work {-}
+
+BPA using MEDC seems possible, although the coverage and accuracy of the data appears to be poor. More investigation seems warranted.

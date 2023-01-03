@@ -1,0 +1,5 @@
+"Trace ID","Trace length","Relative to median"
+"P,C,T",3,1.2
+"P,T,C",3,1.2
+"P,T",2,0.8
+"T,P",2,0.8
